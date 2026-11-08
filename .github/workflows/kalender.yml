@@ -1,0 +1,58 @@
+name: Kalender verschlüsseln
+
+on:
+  schedule:
+    - cron: '50 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kalender
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ICS laden
+        env:
+          ICS_URL: ${{ secrets.ICS_URL }}
+        run: |
+          umask 077
+          curl -fsSL "$ICS_URL" -o /tmp/kalender.ics
+          test -s /tmp/kalender.ics
+
+      - name: Nur bei Änderung neu verschlüsseln
+        id: enc
+        env:
+          KAL_PASS: ${{ secrets.KAL_PASS }}
+        run: |
+          # Wegen des zufälligen Salts ergibt jede Verschlüsselung anderen
+          # Chiffretext. Deshalb wird der Klartext verglichen: alte Datei
+          # entschlüsseln (nur in /tmp) und mit dem neuen Download vergleichen.
+          if [ -f kalender.ics.enc ] && \
+             openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:KAL_PASS \
+               -in kalender.ics.enc -out /tmp/alt.ics 2>/dev/null && \
+             cmp -s /tmp/alt.ics /tmp/kalender.ics; then
+            echo "Kalender unverändert."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:KAL_PASS \
+              -in /tmp/kalender.ics -out kalender.ics.enc
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          rm -f /tmp/alt.ics /tmp/kalender.ics
+
+      - name: Commit & Push
+        if: steps.enc.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add kalender.ics.enc
+          git diff --cached --quiet && exit 0
+          git commit -m "Kalender aktualisiert"
+          git push
